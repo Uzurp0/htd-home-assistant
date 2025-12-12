@@ -275,3 +275,4 @@ class HtdDevice(MediaPlayerEntity):
         self.client.refresh()
 
     async def async_will_remove_from_hass(self):
+        await self.client.async_unsubscribe(self._do_update)

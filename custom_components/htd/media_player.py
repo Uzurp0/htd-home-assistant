@@ -2,6 +2,7 @@
 
 import logging
 import re
+import json
 
 from homeassistant.components.media_player import MediaPlayerEntity
 from homeassistant.components.media_player.const import (
@@ -21,6 +22,8 @@ from htd_client.models import ZoneDetail
 
 from .const import DOMAIN, CONF_DEVICE_NAME
 
+CONF_ZONES = "zones"
+CONF_SOURCES = "sources"
 
 def make_alphanumeric(input_string):
     temp = re.sub(r'[^a-zA-Z0-9]', '_', input_string)
@@ -40,6 +43,30 @@ SUPPORT_HTD = (
 _LOGGER = logging.getLogger(__name__)
 
 type HtdClientConfigEntry = ConfigEntry[BaseClient]
+
+# --- Generic Friendly Names ---
+GENERIC_ZONE_NAMES = {i: f"Zone {i}" for i in range(1, 13)}
+GENERIC_SOURCE_NAMES = {i: f"Source {i}" for i in range(13, 20)}
+
+def _parse_mapping(option_value: str) -> dict[int, str]:
+    """Parse a JSON or comma-separated mapping string into a dict."""
+    if not option_value:
+        return {}
+    try:
+        # Try JSON first
+        parsed = json.loads(option_value)
+        return {int(k): str(v) for k, v in parsed.items()}
+    except Exception:
+        # Fallback: comma-separated like "1=Kitchen,2=Outside"
+        mapping = {}
+        for item in option_value.split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                try:
+                    mapping[int(k.strip())] = v.strip()
+                except ValueError:
+                    continue
+        return mapping
 
 
 async def async_setup_platform(hass, _, async_add_entities, __=None):
@@ -62,13 +89,12 @@ async def async_setup_platform(hass, _, async_add_entities, __=None):
                 device_name,
                 zone,
                 sources,
-                client
+                client,
+                {}
             )
-
             entities.append(entity)
 
     async_add_entities(entities)
-
     return True
 
 
@@ -81,15 +107,20 @@ async def async_setup_entry(_: HomeAssistant, config_entry: HtdClientConfigEntry
     device_name = config_entry.title
     unique_id = config_entry.data.get(CONF_UNIQUE_ID)
     sources = [f"Source {i + 1}" for i in range(source_count)]
+
+    # Parse friendly names from options
+    zones_map = _parse_mapping(config_entry.options.get(CONF_ZONES, ""))
+    sources_map = _parse_mapping(config_entry.options.get(CONF_SOURCES, ""))
+
     for zone in range(1, zone_count + 1):
         entity = HtdDevice(
             unique_id,
             device_name,
             zone,
             sources,
-            client
+            client,
+            {"zones": zones_map, "sources": sources_map}
         )
-
         entities.append(entity)
 
     async_add_entities(entities)
@@ -105,6 +136,8 @@ class HtdDevice(MediaPlayerEntity):
     zone: int = None
     changing_volume: int | None = None
     zone_info: ZoneDetail = None
+    zones_map: dict[int, str] = None
+    sources_map: dict[int, str] = None
 
     def __init__(
         self,
@@ -112,13 +145,16 @@ class HtdDevice(MediaPlayerEntity):
         device_name,
         zone,
         sources,
-        client
+        client,
+        mappings
     ):
         self.unique_id = f"{unique_id}_{zone:02}"
         self.device_name = device_name
         self.zone = zone
         self.client = client
         self.sources = sources
+        self.zones_map = mappings.get("zones", {})
+        self.sources_map = mappings.get("sources", {})
         zone_fmt = f"02" if self.client.model["zones"] > 10 else "01"
         self.entity_id = get_media_player_entity_id(device_name, zone, zone_fmt)
 
@@ -132,7 +168,14 @@ class HtdDevice(MediaPlayerEntity):
 
     @property
     def name(self):
-        return f"Zone {self.zone} ({self.device_name})"
+        """Return friendly zone name if available, hide if 'Unused'."""
+        name = self.zones_map.get(
+            self.zone,
+            GENERIC_ZONE_NAMES.get(self.zone, f"Zone {self.zone} ({self.device_name})")
+        )
+        if not name or name.lower() == "unused":
+            return None  # Hidden until renamed
+        return name
 
     def update(self):
         self.zone_info = self.client.get_zone(self.zone)
@@ -141,13 +184,10 @@ class HtdDevice(MediaPlayerEntity):
     def state(self):
         if not self.client.connected:
             return STATE_UNAVAILABLE
-
         if self.zone_info is None:
             return STATE_UNKNOWN
-
         if self.zone_info.power:
             return STATE_ON
-
         return STATE_OFF
 
     @property
@@ -191,11 +231,32 @@ class HtdDevice(MediaPlayerEntity):
 
     @property
     def source(self) -> str:
-        return self.sources[self.zone_info.source - 1]
+        """Return friendly source name if available, hide if 'Unused'."""
+        name = self.sources_map.get(
+            self.zone_info.source,
+            GENERIC_SOURCE_NAMES.get(self.zone_info.source, f"Source {self.zone_info.source}")
+        )
+        if not name or name.lower() == "unused":
+            return None
+        return name
 
     @property
     def source_list(self):
-        return self.sources
+        """Return the list of available sources with friendly names.
+        - Only include sources that have a name assigned.
+        - Skip any sources explicitly marked 'Unused'.
+        """
+        source_list = []
+        for i in range(len(self.sources)):
+            source_id = i + 1
+            name = self.sources_map.get(
+                source_id,
+                GENERIC_SOURCE_NAMES.get(source_id, f"Source {source_id}")
+            )
+            if not name or name.lower() == "unused":
+                continue
+            source_list.append(name)
+        return source_list
 
     @property
     def media_title(self):
@@ -210,31 +271,7 @@ class HtdDevice(MediaPlayerEntity):
         return "mdi:disc-player"
 
     async def async_added_to_hass(self):
-        """Run when this Entity has been added to HA."""
-        # Sensors should also register callbacks to HA when their state changes
-        # print('registering callback')
         await self.client.async_subscribe(self._do_update)
         self.client.refresh()
 
     async def async_will_remove_from_hass(self):
-        """Entity being removed from hass."""
-        # The opposite of async_added_to_hass. Remove any registered call backs here.
-        await self.client.async_unsubscribe(self._do_update)
-
-    def _do_update(self, zone: int):
-        if zone is None and self.zone_info is not None:
-            return
-
-        if zone is not None and zone != 0 and zone != self.zone:
-            return
-
-        if not self.client.has_zone_data(self.zone):
-            return
-
-        # if there's a target volume for mca, don't update yet
-        if isinstance(self.client, HtdMcaClient) and self.client.has_volume_target(self.zone):
-            return
-
-        if zone is not None and self.client.has_zone_data(zone):
-            self.zone_info = self.client.get_zone(zone)
-            self.schedule_update_ha_state(force_refresh=True)

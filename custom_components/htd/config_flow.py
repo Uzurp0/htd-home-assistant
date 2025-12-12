@@ -14,6 +14,10 @@ from .const import CONF_DEVICE_NAME, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# New constants for friendly names
+CONF_ZONES = "zones"
+CONF_SOURCES = "sources"
+
 
 def configured_instances(hass: HomeAssistant):
     """Return a set of configured instances."""
@@ -24,7 +28,7 @@ def configured_instances(hass: HomeAssistant):
 
 class HtdConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
-    MINOR_VERSION = 1
+    MINOR_VERSION = 2  # bumped minor version for new feature
 
     host: str = None
     port: int = HtdConstants.DEFAULT_PORT
@@ -58,7 +62,7 @@ class HtdConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         self.context["title_placeholders"] = {
-            CONF_NAME: f"{model_info["friendly_name"]} ({host})",
+            CONF_NAME: f"{model_info['friendly_name']} ({host})",
         }
 
         return await self.async_step_custom_connection(new_user_input)
@@ -123,7 +127,10 @@ class HtdConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(
                 title=user_input[CONF_DEVICE_NAME],
                 data=config_entry,
-                options={}
+                options={
+                    CONF_ZONES: user_input.get(CONF_ZONES, ""),
+                    CONF_SOURCES: user_input.get(CONF_SOURCES, ""),
+                }
             )
 
         network_address = (self.host, self.port)
@@ -141,20 +148,20 @@ class HtdOptionsFlowHandler(OptionsFlowWithConfigEntry):
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
             options = {
-                **self.config_entry.data,
+                **self.config_entry.options,
                 **user_input
             }
 
             self.hass.config_entries.async_update_entry(
                 self.config_entry,
-                data=options
+                options=options
             )
 
             return self.async_create_entry(title=self.config_entry.title, data={})
 
         return self.async_show_form(
             step_id='init',
-            data_schema=get_connection_settings_schema(self.config_entry)
+            data_schema=get_options_schema(self.config_entry.title)
         )
 
 
@@ -164,6 +171,8 @@ def get_options_schema(friendly_name: str):
             vol.Required(
                 CONF_DEVICE_NAME, default=friendly_name
             ): cv.string,
+            vol.Optional(CONF_ZONES, default=""): cv.string,
+            vol.Optional(CONF_SOURCES, default=""): cv.string,
         }
     )
 
